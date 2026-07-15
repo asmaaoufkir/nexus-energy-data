@@ -1,37 +1,210 @@
+# Nexus Energy Data
 
-# Project: nexus-energy-data
-> **Architecte Data Senior (14+ ans d'expérience)** > Scope: Ingestion industrielle multi-sources multi-pipelines (Volume cible: 2 To/an)  
-> Stack: Logstash 8.11.3 (Isolate Processing Mode), Elasticsearch 8.11.3 TSDS Active.
+> Projet de plateforme de données industrielle orientée énergie, conçu pour l’ingestion multi-sources, le traitement temps réel et la visualisation métier.
 
-## Architecture & Routage Isolé
-Le projet orchestre le traitement de flux asynchrones cloisonnés au sein du fichier `pipelines.yml` afin de prévenir tout phénomène de contre-pression (*backpressure*). 
-- **Pipeline 1 (energy-iot)** : Consomme le streaming temps réel Kafka (IoT Éolien). File d'attente persistante disque activée (`queue.type: persisted`).
-- **Pipeline 2 (energy-sftp)** : Absorbe les batchs horaires de rapports de maintenance via fichiers CSV partagés.
-- **Pipeline 3 (elastic-output)** : Sink centralisé d'écriture via le bus mémoire interne (`pipeline` communication), isolant l'accès sécurisé à Elasticsearch.
-- **Service 4 (Kibana)** : Visualisation sécurisée des data streams Elastic `metrics-energy.iot-default` et `logs-energy.maintenance-default`.
+## Vue d’ensemble
 
-## Kibana et dashboards énergie
-Ce projet expose Kibana en HTTPS sur `https://localhost:5601`.
+Nexus Energy Data est une architecture Data Engineering complète mettant en œuvre :
 
-Points de sécurité et bonnes pratiques :
-- TLS activé côté Elasticsearch et Kibana avec certificats auto-signés validés par la même CA.
-- Authentification Elasticsearch via l’utilisateur `elastic` et mot de passe secret stocké dans `.env`.
-- `xpack.encryptedSavedObjects.encryptionKey` défini pour protéger les objets sauvegardés Kibana.
-- Accès réseau strictement sur `nexus-network` entre les services Docker.
+- ingestion de données IoT depuis Kafka
+- ingestion de logs de maintenance depuis des fichiers CSV via SFTP
+- traitement et routage via Logstash
+- stockage et analyse dans Elasticsearch 8.x
+- visualisation métier dans Kibana
 
-Index patterns à créer dans Kibana :
-- `metrics-energy.iot-default*` pour le data stream IoT.
-- `logs-energy.maintenance-default*` pour le data stream maintenance.
+Le projet est pensé pour illustrer une approche robuste, sécurisée et prête pour une présentation technique à un recruteur ou à un comité technique.
 
-Dashboards recommandés :
-- **Wind Farm Performance Overview** : courbes de tendance sur `avg(power_output)` et `avg(wind_speed)`.
-- **Turbine Status & Availability** : camembert / barres de la distribution des statuts `status` et du nombre de turbines actives.
-- **Maintenance & Vibration Trends** : visualisations des actions et de la vibration par `asset` et `tech`.
-- **Energy Production vs Maintenance Impact** : corrélation entre production et événements métiers de maintenance.
+## Architecture
 
-## Déploiement Rapide (Quick Start)
+Le projet repose sur les composants suivants :
 
-### 1. Pré-requis système
-S'assurer que le paramètre kernel système `vm.max_map_count` est correctement configuré pour Elasticsearch :
+- Python Simulator : génération de données de test depuis la machine hôte
+- Kafka : consommation du flux temps réel IoT
+- Logstash : traitement des pipelines d’ingestion et d’export
+- Elasticsearch : stockage dans des data streams TSDS
+- Kibana : tableaux de bord et exploration métier
+- Docker Compose : orchestration de la stack
+- Makefile : automatisation des opérations clés du projet
+
+## Fonctionnement métier
+
+Le flux de données couvre deux cas d’usage principaux :
+
+1. Données IoT énergétiques
+   - métriques de performance des turbines
+   - vitesse du vent
+   - puissance produite
+   - statut opérationnel
+
+2. Données de maintenance industrielle
+   - fichiers CSV de rapports de maintenance
+   - interventions techniques
+   - niveaux de vibration
+   - actifs critiques et techniciens
+
+## Structure du projet
+
+```text
+.
+├── docker-compose.yml
+├── Makefile
+├── README.md
+├── pipeline/
+│   ├── pipelines.yml
+│   └── conf.d/
+├── simulation/
+│   └── simulateur.py
+└── Docs/
+```
+
+## Prérequis
+
+Avant de démarrer, assurez-vous d’avoir :
+
+- Docker et Docker Compose installés
+- Python 3.x
+- accès aux ports locaux suivants : 9200, 5601, 9092, 5044
+- un fichier `.env` correctement renseigné avec les variables suivantes :
+  - `ELASTIC_PASSWORD`
+  - `KIBANA_PASSWORD`
+  - `KIBANA_ENCRYPTION_KEY`
+  - `ES_INGEST_USER`
+
+Il est également recommandé de configurer le paramètre système suivant :
+
 ```bash
 sudo sysctl -w vm.max_map_count=262144
+```
+
+## Démarrage rapide
+
+### 1. Initialiser l’environnement
+
+```bash
+make setup
+```
+
+Cette commande prépare :
+
+- les répertoires de stockage locaux
+- l’environnement virtuel Python
+- les dépendances nécessaires
+
+### 2. Générer les pipelines Logstash
+
+```bash
+make pipelines
+```
+
+Cette commande crée les fichiers de configuration suivants :
+
+- `pipeline/pipelines.yml`
+- `pipeline/conf.d/01-input-iot.conf`
+- `pipeline/conf.d/02-input-sftp.conf`
+- `pipeline/conf.d/99-output-elastic.conf`
+
+### 3. Démarrer la stack
+
+```bash
+make start
+```
+
+Le démarrage lance les services suivants :
+
+- Elasticsearch
+- Kafka
+- Logstash
+- Kibana
+
+### 4. Initialiser Elasticsearch et Kibana
+
+```bash
+make init-es-template
+make init-kibana-user
+make init-kibana-dataviews
+```
+
+Ces étapes permettent de :
+
+- injecter le template TSDS Elasticsearch
+- configurer les identifiants Kibana
+- créer les data views métier
+
+### 5. Lancer la simulation de charge
+
+```bash
+make test-load
+```
+
+Cette commande démarre le simulateur Python pour générer des données de test et alimenter les pipelines.
+
+## Commandes principales du Makefile
+
+```bash
+make help         # Affiche la liste des commandes disponibles
+make setup        # Initialise l’environnement Python et les répertoires
+make pipelines    # Génère les fichiers de configuration Logstash
+make start        # Démarre la stack Docker
+make status       # Vérifie l’état des services
+make stop         # Arrête les services
+make clean        # Supprime les conteneurs et les volumes associés
+```
+
+## Accès aux services
+
+- Elasticsearch : `https://localhost:9200`
+- Kibana : `https://localhost:5601`
+- Kafka : `localhost:9092`
+- Logstash : `localhost:5044`
+
+## Pipelines implémentés
+
+### Pipeline IoT
+
+- consommation de messages Kafka
+- transformation des données JSON
+- enrichissement des métadonnées
+- routage vers Elasticsearch
+
+### Pipeline SFTP
+
+- lecture de fichiers CSV dans un répertoire partagé
+- parsing des logs de maintenance
+- hashage de certains identifiants pour la confidentialité
+- transformation et écriture vers Elasticsearch
+
+### Sink Elasticsearch
+
+- écriture centralisée vers les data streams
+- isolation du traitement de sortie
+- intégration avec la couche de stockage analytique
+
+## Observabilité et supervision
+
+Pour surveiller la santé de l’infrastructure :
+
+```bash
+make status
+docker stats nexus-elasticsearch nexus-logstash nexus-kafka nexus-kibana
+```
+
+## Points forts techniques
+
+Ce projet met en évidence plusieurs compétences clés de niveau senior :
+
+- architecture événementielle multi-sources
+- pipelines de traitement isolés et sécurisés
+- utilisation de data streams Elasticsearch orientés séries temporelles
+- intégration Docker / orchestration locale
+- automatisation avec Makefile
+- préparation d’un environnement de démonstration professionnelle
+
+## Objectif de présentation
+
+Ce projet peut être présenté comme une preuve concrète de compétence en :
+
+- Data Engineering
+- ingestion temps réel et batch
+- architecture data moderne
+- observabilité et exploitation
+- conception de solutions orientées business et opérationnelles
