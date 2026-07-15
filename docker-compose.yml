@@ -1,0 +1,267 @@
+# =============================================================================
+# nexus-energy-data — Docker Compose
+# Stack : Elasticsearch 8.11.3 TSDS · Kafka 3.1 · Logstash 8.11.3
+# Source de vérité : https://www.elastic.co/blog/getting-started-with-the-elastic-stack-and-docker-compose
+# =============================================================================
+
+networks:
+  nexus-network:
+    driver: bridge
+
+volumes:
+  # Volume DÉDIÉ aux certificats TLS — séparé des données ES (bonne pratique Elastic officielle)
+  # Partagé entre le service setup, elasticsearch et logstash
+  es-certs:
+    driver: local
+  # Volume données ES
+  es-data:
+    driver: local
+  # Volume données Logstash (queue persistante)
+  logstash-data:
+    driver: local
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # 1. SETUP — Génération des certificats TLS via elasticsearch-certutil
+  #    Pattern officiel Elastic Blog (Eddie Mitchell, 2023)
+  #    Ce conteneur s'exécute une seule fois et s'arrête proprement.
+  # ---------------------------------------------------------------------------
+  setup:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.3
+    container_name: nexus-setup
+    user: "0"   # root requis pour chown sur le volume
+    volumes:
+      - es-certs:/usr/share/elasticsearch/config/certs
+    env_file:
+      - ./.env
+    networks:
+      - nexus-network
+    # Génère la CA + les certs node si absents (idempotent)
+    command: >
+      bash -c '
+        if [ ! -f config/certs/ca.zip ]; then
+          echo "[SETUP] Génération de la CA...";
+          bin/elasticsearch-certutil ca --silent --pem -out config/certs/ca.zip;
+          unzip config/certs/ca.zip -d config/certs;
+        fi;
+        if [ ! -f config/certs/certs.zip ] || [ ! -f config/certs/nexus-node-1/nexus-node-1.crt ] || [ ! -f config/certs/nexus-kibana/nexus-kibana.crt ]; then
+          echo "[SETUP] Génération des certificats Elasticsearch + Kibana...";
+          echo -ne \
+            "instances:\n"\
+            "  - name: nexus-node-1\n"\
+            "    dns:\n"\
+            "      - nexus-elasticsearch\n"\
+            "      - localhost\n"\
+            "    ip:\n"\
+            "      - 127.0.0.1\n"\
+            "  - name: nexus-kibana\n"\
+            "    dns:\n"\
+            "      - nexus-kibana\n"\
+            "      - localhost\n"\
+            "    ip:\n"\
+            "      - 127.0.0.1\n"\
+            > config/certs/instances.yml;
+          bin/elasticsearch-certutil cert --silent --pem \
+            -out config/certs/certs.zip \
+            --in config/certs/instances.yml \
+            --ca-cert config/certs/ca/ca.crt \
+            --ca-key  config/certs/ca/ca.key;
+          unzip -o config/certs/certs.zip -d config/certs;
+        fi;
+        echo "[SETUP] Correction des permissions...";
+        chown -R 1000:0 config/certs;
+        find config/certs -type d -exec chmod 755 {} \;;
+        find config/certs -type f -exec chmod 644 {} \;;
+        echo "[SETUP] Certificats prêts.";
+      '
+    healthcheck:
+      test: ["CMD-SHELL", "[ -f config/certs/nexus-node-1/nexus-node-1.crt ] && [ -f config/certs/nexus-kibana/nexus-kibana.crt ]"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  # ---------------------------------------------------------------------------
+  # 2. ELASTICSEARCH 8.11.3 — Single-node TSDS
+  # ---------------------------------------------------------------------------
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.3
+    container_name: nexus-elasticsearch
+    env_file:
+      - ./.env
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    environment:
+      # --- Identité nœud / cluster ---
+      - node.name=nexus-node-1
+      - cluster.name=nexus-cluster
+      - discovery.type=single-node
+
+      # --- Credentials (injectés depuis .env) ---
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+
+      # --- JVM heap (règle Elastic : Xms == Xmx, max 50 % RAM)  32Go---
+      - "ES_JAVA_OPTS=-Xms6g -Xmx6g"
+      - bootstrap.memory_lock=true
+
+      # --- Sécurité xpack ---
+      - xpack.security.enabled=true
+      - xpack.security.enrollment.enabled=true
+
+      # TLS HTTP (client → ES : Logstash, curl, Kibana…)
+      - xpack.security.http.ssl.enabled=true
+      - xpack.security.http.ssl.key=certs/nexus-node-1/nexus-node-1.key
+      - xpack.security.http.ssl.certificate=certs/nexus-node-1/nexus-node-1.crt
+      - xpack.security.http.ssl.certificate_authorities=certs/ca/ca.crt
+
+      # TLS Transport (inter-nœuds — obligatoire en production ES 8.x)
+      - xpack.security.transport.ssl.enabled=true
+      - xpack.security.transport.ssl.key=certs/nexus-node-1/nexus-node-1.key
+      - xpack.security.transport.ssl.certificate=certs/nexus-node-1/nexus-node-1.crt
+      - xpack.security.transport.ssl.certificate_authorities=certs/ca/ca.crt
+      - xpack.security.transport.ssl.verification_mode=certificate
+
+      # --- Disk watermarks (namespace CORRECT — cluster.routing.allocation.disk.*)
+      # Source : https://www.elastic.co/guide/en/elasticsearch/reference/8.11/fix-watermark-errors.html
+      # low     : ES arrête d'allouer des replicas sur ce nœud
+      # high    : ES commence à déplacer des shards vers d'autres nœuds
+      # flood_stage : ES passe les indices en read-only pour protéger les données
+      - cluster.routing.allocation.disk.watermark.low=85%
+      - cluster.routing.allocation.disk.watermark.high=90%
+      - cluster.routing.allocation.disk.watermark.flood_stage=95%
+      - cluster.info.update.interval=1m
+
+      # --- Licence (basic = gratuit, changer en 'trial' pour tester ML/TSDS avancé) ---
+      - xpack.license.self_generated.type=basic
+
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      # Données ES — volume séparé des certs (performances + isolation)
+      - es-data:/usr/share/elasticsearch/data
+      # Certs générés par le service setup
+      - es-certs:/usr/share/elasticsearch/config/certs
+    ports:
+      - "9200:9200"
+    networks:
+      - nexus-network
+    healthcheck:
+      # On vérifie que ES répond avec une erreur 401 (auth requise = nœud UP + sécurité active)
+      test:
+        [
+          "CMD-SHELL",
+          "curl -s --cacert config/certs/ca/ca.crt https://localhost:9200 | grep -q 'missing authentication credentials'"
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 60
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # 3. KAFKA 3.1 — KRaft mode (sans Zookeeper)
+  # ---------------------------------------------------------------------------
+  kafka:
+    image: apache/kafka:latest
+    container_name: nexus-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      - KAFKA_NODE_ID=1
+      - KAFKA_PROCESS_ROLES=broker,controller
+      - KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093
+      
+      # Modification des interfaces d'écoute (Ajout de INTERNAL)
+      - KAFKA_LISTENERS=INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      
+      # On annonce le nom du conteneur pour Docker, et localhost pour votre machine
+      - KAFKA_ADVERTISED_LISTENERS=INTERNAL://nexus-kafka:29092,EXTERNAL://localhost:9092
+      
+      - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      - KAFKA_INTER_BROKER_LISTENER_NAME=INTERNAL
+      
+      # Single-broker KRaft requires internal topic replication factor = 1
+      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+      - KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
+      - KAFKA_DEFAULT_REPLICATION_FACTOR=1
+      - KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0
+      
+      - KAFKA_LOG_DIRS=/tmp/kraft-combined-logs
+    networks:
+      - nexus-network
+  # ---------------------------------------------------------------------------
+  # 4. LOGSTASH 8.11.3 — Pipelines isolés (backpressure prevention)
+  # ---------------------------------------------------------------------------
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.11.3
+    container_name: nexus-logstash
+    env_file:
+      - ./.env
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      # Credentials ES injectés depuis .env
+      - ES_INGEST_USER=${ES_INGEST_USER:-elastic}
+      - ES_INGEST_PASSWORD=${ELASTIC_PASSWORD}
+      - LS_JAVA_OPTS=-Xms4g -Xmx4g
+      # Modifiez l'hôte par défaut "elasticsearch" par votre conteneur HTTPS
+      - XPACK_MONITORING_ELASTICSEARCH_HOSTS="https://nexus-elasticsearch:9200"
+      - XPACK_MONITORING_ELASTICSEARCH_USERNAME="${ES_INGEST_USER}"
+      - XPACK_MONITORING_ELASTICSEARCH_PASSWORD="${ELASTIC_PASSWORD}"
+      - XPACK_MONITORING_ELASTICSEARCH_SSL_CERTIFICATE_AUTHORITY="/usr/share/logstash/config/certs/ca/ca.crt"
+      
+      # --- IMPORTANT : ON DESACTIVE LA GESTION CENTRALISEE ---
+      # On force Logstash à lire ton fichier local pipelines.yml
+      - XPACK_MANAGEMENT_ENABLED=false
+    volumes:
+      - ./pipeline/pipelines.yml:/usr/share/logstash/config/pipelines.yml:ro
+      - ./pipeline/conf.d:/usr/share/logstash/pipeline:ro
+      - logstash-data:/usr/share/logstash/data
+      - /var/log/energy/sftp:/var/log/energy/sftp:ro
+      # Accès au CA Elastic pour valider le TLS ES → Logstash
+      - es-certs:/usr/share/logstash/config/certs:ro
+    ports:
+      - "5044:5044"
+      - "9600:9600"
+    networks:
+      - nexus-network
+
+  # ---------------------------------------------------------------------------
+  # 5. KIBANA 8.11.3 — Visualisation, dacerts/ca/ca.crtshboards métier et exploration sécurisée
+  # ---------------------------------------------------------------------------
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.3
+    container_name: nexus-kibana
+    env_file:
+      - ./.env
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      - ELASTICSEARCH_HOSTS=https://nexus-elasticsearch:9200
+      - ELASTICSEARCH_USERNAME=${KIBANA_USER}
+      - ELASTICSEARCH_PASSWORD=${KIBANA_PASSWORD}
+      - ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES=/usr/share/kibana/config/certs/ca/ca.crt
+      - ELASTICSEARCH_SSL_VERIFICATIONMODE=certificate
+      - SERVER_HOST=0.0.0.0
+      - SERVER_SSL_ENABLED=true
+      - SERVER_SSL_CERTIFICATE=/usr/share/kibana/config/certs/nexus-node-1/nexus-node-1.crt
+      - SERVER_SSL_KEY=/usr/share/kibana/config/certs/nexus-node-1/nexus-node-1.key
+      - XPACK_ENCRYPTED_SAVED_OBJECTS_ENCRYPTION_KEY=${KIBANA_ENCRYPTION_KEY}
+    volumes:
+      - es-certs:/usr/share/kibana/config/certs:ro
+    ports:
+      - "5601:5601"
+    networks:
+      - nexus-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s --cacert /usr/share/kibana/config/ https://localhost:5601/api/status | grep -q '\"overall\"'"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 40s
+    
