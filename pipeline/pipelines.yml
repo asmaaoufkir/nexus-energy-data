@@ -1,16 +1,16 @@
 - pipeline.id: energy-iot
   path.config: "/usr/share/logstash/pipeline/01-input-iot.conf"
   pipeline.workers: 4
-  pipeline.batch.size: 500
+  pipeline.batch.size: 3000
   queue.type: persisted
 
 - pipeline.id: energy-sftp
   path.config: "/usr/share/logstash/pipeline/02-input-sftp.conf"
   pipeline.workers: 2
-  pipeline.batch.size: 125
+  pipeline.batch.size: 500
   queue.type: memory
 
 - pipeline.id: central-elastic-sink
   path.config: "/usr/share/logstash/pipeline/99-output-elastic.conf"
   pipeline.workers: 4
-  pipeline.batch.size: 1000
+  pipeline.batch.size: 3500

@@ -16,9 +16,6 @@ volumes:
   # Volume données ES
   es-data:
     driver: local
- # Volume données ES
-  es_backups:
-    driver: local
   # Volume données Logstash (queue persistante)
   logstash-data:
     driver: local
@@ -105,9 +102,9 @@ services:
       - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
 
       # --- JVM heap (règle Elastic : Xms == Xmx, max 50 % RAM)  32Go---
-      - "ES_JAVA_OPTS=-Xms6g -Xmx6g"
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m" # Heap bridée au strict minimum
+      - thread_pool.write.queue_size=10
       - bootstrap.memory_lock=true
-      - path.repo=/usr/share/elasticsearch/backup
 
       # --- Sécurité xpack ---
       - xpack.security.enabled=true
@@ -138,7 +135,11 @@ services:
 
       # --- Licence (basic = gratuit, changer en 'trial' pour tester ML/TSDS avancé) ---
       - xpack.license.self_generated.type=basic
-
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5' # Limite à un demi-coeur CPU
+          memory: 1g
     ulimits:
       memlock:
         soft: -1
@@ -148,7 +149,6 @@ services:
       - es-data:/usr/share/elasticsearch/data
       # Certs générés par le service setup
       - es-certs:/usr/share/elasticsearch/config/certs
-      - es_backups:/usr/share/elasticsearch/backup
     ports:
       - "9200:9200"
     networks:
@@ -210,18 +210,23 @@ services:
         condition: service_healthy
     environment:
       # Credentials ES injectés depuis .env
-      - ELASTIC_USER=${ELASTIC_USER:-elastic}
-      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
-      - LS_JAVA_OPTS=-Xms4g -Xmx4g
+      - ES_INGEST_USER=${ES_INGEST_USER:-elastic}
+      - ES_INGEST_PASSWORD=${ELASTIC_PASSWORD}
+      - LS_JAVA_OPTS=-Xms256m -Xmx256m
       # Modifiez l'hôte par défaut "elasticsearch" par votre conteneur HTTPS
       - XPACK_MONITORING_ELASTICSEARCH_HOSTS="https://nexus-elasticsearch:9200"
-      - XPACK_MONITORING_ELASTICSEARCH_USERNAME="${ELASTIC_USER}"
+      - XPACK_MONITORING_ELASTICSEARCH_USERNAME="${ES_INGEST_USER}"
       - XPACK_MONITORING_ELASTICSEARCH_PASSWORD="${ELASTIC_PASSWORD}"
       - XPACK_MONITORING_ELASTICSEARCH_SSL_CERTIFICATE_AUTHORITY="/usr/share/logstash/config/certs/ca/ca.crt"
       
       # --- IMPORTANT : ON DESACTIVE LA GESTION CENTRALISEE ---
       # On force Logstash à lire ton fichier local pipelines.yml
       - XPACK_MANAGEMENT_ENABLED=false
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 1g
     volumes:
       - ./pipeline/pipelines.yml:/usr/share/logstash/config/pipelines.yml:ro
       - ./pipeline/conf.d:/usr/share/logstash/pipeline:ro

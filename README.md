@@ -208,3 +208,14 @@ Ce projet peut être présenté comme une preuve concrète de compétence en :
 - architecture data moderne
 - observabilité et exploitation
 - conception de solutions orientées business et opérationnelles
+
+
+
+# 1. Suivre la mémoire Java allouée (hm), utilisée (hc) et le Garbage Collector
+curl -u elastic:ShellSeniorSecretKey2026 --cacert certs/ca/ca.crt -s "https://localhost:9200/_cat/nodes?v=true&h=name,hc,hm,rc,rm,gc"
+
+# 2. Vérifier les files d'attente d'écriture pour éviter les rejets de requêtes
+curl -u elastic:ShellSeniorSecretKey2026 --cacert certs/ca/ca.crt -s "https://localhost:9200/_cat/thread_pool/write?v=true&h=node_name,name,active,queue,rejected,completed"
+
+# 3. Analyser les processeurs pour repérer d'éventuels ralentissements avec le paramètre ignore_idle_threads=false et affiche que les infos utils
+curl -u elastic:ShellSeniorSecretKey2026 --cacert certs/ca/ca.crt -s "https://localhost:9200/_nodes/hot_threads?type=cpu&interval=500ms&ignore_idle_threads=false" | grep -E "^\s*[0-9.]*%"

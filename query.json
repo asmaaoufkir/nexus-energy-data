@@ -1,0 +1,5 @@
+{
+  "size": 2,
+  "query": { "match_all": {} },
+  "_source": ["turbine_id", "timestamp", "@timestamp"]
+}
