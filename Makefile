@@ -3,9 +3,7 @@ PROJECT_NAME=nexus-energy-data
 ENV_FILE=.env
 PYTHON_VENV=.venv
 PYTHON_SCRIPT=simulation/simulateur.py
-ELASTIC_URL=https://localhost:9200
-KIBANA_URL=https://localhost:5601
-KIBANA_USER=elastic
+
 
 # Indique à Make de charger le fichier .env s'il existe
 ifneq (,$(wildcard .env))
@@ -170,7 +168,7 @@ output {
   # ============================================================
   if [data_stream][type] {
     elasticsearch {
-      hosts => ["https://nexus-elasticsearch:9200"]
+      hosts => ["$${ELASTIC_INETRNE_URL}"]
       user => "$${ELASTIC_USER}"
       password => "$${ELASTIC_PASSWORD}"
       ssl_enabled => true
@@ -195,7 +193,7 @@ output {
   # ============================================================
   if [data_stream][dataset] == "energy.iot" {
     elasticsearch {
-      hosts => ["https://nexus-elasticsearch:9200"]
+      hosts => ["$${ELASTIC_INETRNE_URL}"]
       user => "$${ELASTIC_USER}"
       password => "$${ELASTIC_PASSWORD}"
       ssl_enabled => true
@@ -209,7 +207,7 @@ output {
     }
   } else if [data_stream][dataset] == "energy.maintenance" {
     elasticsearch {
-      hosts => ["https://nexus-elasticsearch:9200"]
+      hosts => ["$${ELASTIC_INETRNE_URL}"]
       user => "$${ELASTIC_USER}"
       password => "$${ELASTIC_PASSWORD}"
       ssl_enabled => true
@@ -242,6 +240,9 @@ help:
 	@echo "  make stop                  - Arrête l'infrastructure"
 	@echo "  make clean                 - Supprime les conteneurs et purge les caches locaux"
 	@echo "  make reset-benchmark       - Réinitialise les index pour un benchmark propre (supprime tout)"
+	@echo "  make benchmark-stats       - Génère le tableau comparatif TSDS vs Classique via le script Python"
+	@echo "  make force-downsample      - Force l'exécution immédiate du downsampling sur le backing index TSDS"
+
 
 
 pipelines:
@@ -333,8 +334,13 @@ init-kibana-dataviews:
 	@echo "[KIBANA] Data views créés (ou déjà existants)."
 
 test-load:
+	@echo "[PYTHON] Vérification des dépendances Python dans l'environnement virtuel..."
+	@$(PYTHON_VENV)/bin/python3 -c "import dotenv" 2>/dev/null || ( \
+		echo "[PYTHON] Module 'python-dotenv' manquant. Installation automatique..." && \
+		$(PYTHON_VENV)/bin/pip install python-dotenv \
+	)
 	@echo "[PYTHON] Activation du simulateur de données Haute performance (20Go-50Go stress-test)..."
-	$(PYTHON_VENV)/bin/python3 $(PYTHON_SCRIPT)
+	@$(PYTHON_VENV)/bin/python3 $(PYTHON_SCRIPT)
 
 status:
 	@echo "[STATUS] Conteneurs :"
@@ -362,3 +368,24 @@ reset-benchmark:
 	@echo "[RESET] Attente du démarrage de Logstash..."
 	#@sleep 10
 	@echo "[RESET] Benchmark prêt. Lancez 'make test-load' pour démarrer la simulation."
+
+benchmark-stats: ## Génère le tableau comparatif TSDS vs Classique via le script Python
+	@echo "[BENCHMARK] Récupération des métriques d'indexation depuis Elasticsearch..."
+	@curl -s -k -u "$(ELASTIC_USER):$(ELASTIC_PASSWORD)" "$(ELASTIC_URL)/_stats?expand_wildcards=all" | python3 generate_bilan.py
+
+  .PHONY: force-downsample
+
+force-downsample: ## Force le Downsampling immédiat sur le backing index TSDS
+	@echo "[ELASTIC] Détection du backing index TSDS..."
+	@BACKING_INDEX=$$(curl -sk -u "$(ELASTIC_USER):$(ELASTIC_PASSWORD)" "$(ELASTIC_URL)/_cat/indices/.ds-metrics-energy.iot-default*?h=index" | head -n 1 | tr -d '\r') ; \
+	if [ -z "$$BACKING_INDEX" ]; then \
+		echo "❌ Aucun backing index TSDS trouvé pour metrics-energy.iot-default." ; exit 1 ; \
+	fi ; \
+	echo "[ELASTIC] Backing index identifié : $$BACKING_INDEX" ; \
+	echo "[ELASTIC] Vérification / Application du blocage en écriture (Read-Only)..." ; \
+	curl -sk -u "$(ELASTIC_USER):$(ELASTIC_PASSWORD)" -X PUT "$(ELASTIC_URL)/$$BACKING_INDEX/_settings" \
+		-H "Content-Type: application/json" -d '{"index.blocks.write": true}' ; \
+	echo "\n[ELASTIC] Lancement de l'agrégation Downsampling (intervalle 1h)..." ; \
+	curl -sk -u "$(ELASTIC_USER):$(ELASTIC_PASSWORD)" -X POST "$(ELASTIC_URL)/$$BACKING_INDEX/_downsample/downsampled-metrics-energy-iot-1h" \
+		-H "Content-Type: application/json" -d '{"fixed_interval": "1h"}' ; \
+	echo "\n✅ Downsampling généré avec succès dans 'downsampled-metrics-energy-iot-1h'."

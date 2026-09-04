@@ -1,4 +1,5 @@
-import sys, json
+import sys
+import json
 
 try:
     data = json.load(sys.stdin).get("indices", {})
@@ -6,15 +7,29 @@ except Exception as e:
     print(f"Erreur de lecture JSON: {e}")
     sys.exit(1)
 
-def get_stats(idx):
-    obj = data.get(idx, {}).get("primaries", {})
+def find_index_by_keyword(data_dict, keyword):
+    for idx_name in data_dict.keys():
+        # Exclure le backing index source .ds-...-10m
+        if keyword in idx_name and not idx_name.endswith("-10m"):
+            return idx_name
+    return None
+
+def get_stats(idx_name):
+    if not idx_name or idx_name not in data:
+        return 0, 0
+    obj = data.get(idx_name, {}).get("primaries", {})
     docs = obj.get("docs", {}).get("count", 0)
     bytes_val = obj.get("store", {}).get("size_in_bytes", 0)
     return docs, bytes_val
 
-c_docs, c_bytes = get_stats("metrics-energy-iot-classic")
-h_docs, h_bytes = get_stats(".ds-metrics-energy.iot-default-2026.08.10-000001")
-w_docs, w_bytes = get_stats("downsampled-metrics-energy-iot-1h")
+# Détection dynamique
+classic_idx = find_index_by_keyword(data, "metrics-energy-iot-classic")
+hot_idx = find_index_by_keyword(data, ".ds-metrics-energy.iot-default")
+warm_idx = find_index_by_keyword(data, "downsampled-metrics-energy-iot-1h")
+
+c_docs, c_bytes = get_stats(classic_idx)
+h_docs, h_bytes = get_stats(hot_idx)
+w_docs, w_bytes = get_stats(warm_idx)
 
 def fmt_docs(d, is_warm=False):
     if is_warm:
@@ -36,7 +51,7 @@ c_opd = c_bytes / c_docs if c_docs else 0
 h_opd = h_bytes / h_docs if h_docs else 0
 
 gain_hot = ((h_opd - c_opd) / c_opd * 100) if c_opd else 0
-gain_warm = ((w_bytes - h_bytes) / h_bytes * 100) if h_bytes else -99.99
+gain_warm = ((w_bytes - h_bytes) / h_bytes * 100) if h_bytes else 0.0
 
 print("\nBILAN BENCHMARK : NEXUS ENERGY DATA PIPELINE")
 print("=" * 105)
